@@ -62,11 +62,12 @@ func main() {
 
 	// 3. Phase 1: Creation
 	fmt.Printf("Phase 1: Creating %d accounts with variable slots (avg %d, k=%d)...\n", *nAccounts, *nSlots, *kCommit)
-	start := time.Now()
+	phase1Start := time.Now()
 
 	addrs := make([]common.Address, *nAccounts)
 	batchSize := *kCommit
 	var currentRoot common.Hash
+	var totalSlotsCreated int64
 
 	// Use a fixed seed for deterministic benchmarking (borrowed from C# version)
 	r := rand.New(rand.NewSource(42))
@@ -81,8 +82,9 @@ func main() {
 		// Borrowed from C#: Variable slots to simulate real world distribution (avg nSlots)
 		vSlots := r.Intn(*nSlots * 2)
 		for j := 0; j < vSlots; j++ {
+			totalSlotsCreated++
 			// Include account index i to ensure slots are unique across different accounts
-			slotKey := common.BytesToHash(crypto.Keccak256([]byte(fmt.Sprintf("account-%d-slot-%d", i, j))))
+			slotKey := common.BytesToHash(crypto.Keccak256([]byte(fmt.Sprintf("acc-%d-slot-%d", i, j))))
 
 			// Borrowed from C#: 30% probability for zero or small values to test RLP compression
 			var slotVal common.Hash
@@ -126,15 +128,19 @@ func main() {
 			runtime.GC() // Suggest GC to clean up
 		}
 	}
+	p1Elapsed := time.Since(phase1Start)
 	fmt.Println()
-	fmt.Printf("Creation finished in %v. Final Root: %x\n", time.Since(start), currentRoot)
+	fmt.Printf("Creation finished in %v. Final Root: %x\n", p1Elapsed, currentRoot)
+	fmt.Printf("Total Slots Created: %d | Throughput: %.2f slots/s\n", totalSlotsCreated, float64(totalSlotsCreated)/p1Elapsed.Seconds())
 
 	// 4. Phase 2: Modification
 	if *mModify > *nAccounts {
 		*mModify = *nAccounts
 	}
-	fmt.Printf("Phase 2: Randomly modifying slots in %d accounts (k=%d)...\n", *mModify, *kCommit)
-	start = time.Now()
+	fmt.Printf("\nPhase 2: Randomly modifying slots in %d accounts (k=%d)...\n", *mModify, *kCommit)
+	phase2Start := time.Now()
+	var totalSlotsModified int64
+	const slotsToModifyPerAccount = 500
 
 	// statedb is already updated to currentRoot from phase 1
 	rMod := rand.New(rand.NewSource(time.Now().UnixNano()))
@@ -144,10 +150,11 @@ func main() {
 		addr := addrs[accountIdx]
 
 		// Modify some slots randomly
-		for j := 0; j < 500; j++ { // modify 500 random slots per account
+		for j := 0; j < slotsToModifyPerAccount; j++ {
+			totalSlotsModified++
 			slotIdx := rMod.Intn(*nSlots)
 			// Use the same unique key pattern as in Phase 1
-			slotKey := common.BytesToHash(crypto.Keccak256([]byte(fmt.Sprintf("account-%d-slot-%d", accountIdx, slotIdx))))
+			slotKey := common.BytesToHash(crypto.Keccak256([]byte(fmt.Sprintf("acc-%d-slot-%d", accountIdx, slotIdx))))
 			var newVal common.Hash
 			rMod.Read(newVal[:])
 			statedb.SetState(addr, slotKey, newVal)
@@ -180,8 +187,10 @@ func main() {
 			runtime.GC()
 		}
 	}
+	p2Elapsed := time.Since(phase2Start)
 	fmt.Println()
-	fmt.Printf("Modification finished in %v. Final New Root: %x\n", time.Since(start), currentRoot)
+	fmt.Printf("Modification finished in %v. Final New Root: %x\n", p2Elapsed, currentRoot)
+	fmt.Printf("Total Slots Modified: %d | Throughput: %.2f slots/s\n", totalSlotsModified, float64(totalSlotsModified)/p2Elapsed.Seconds())
 
 	// 5. Final Report
 	size := getDirSize(*dbPath)
@@ -206,4 +215,3 @@ func getDirSize(path string) int64 {
 	}
 	return size
 }
-
