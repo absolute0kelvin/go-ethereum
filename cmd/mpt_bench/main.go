@@ -14,11 +14,11 @@ import (
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/tracing"
 	"github.com/ethereum/go-ethereum/crypto"
-	"github.com/ethereum/go-ethereum/ethdb/leveldb"
+	ethpebble "github.com/ethereum/go-ethereum/ethdb/pebble"
 	"github.com/ethereum/go-ethereum/triedb"
 	"github.com/ethereum/go-ethereum/triedb/pathdb"
 	"github.com/holiman/uint256"
-	"github.com/syndtr/goleveldb/leveldb/opt"
+	"github.com/cockroachdb/pebble"
 )
 
 func main() {
@@ -27,7 +27,7 @@ func main() {
 		nSlots    = flag.Int("slots", 1000, "Number of slots per account")
 		mModify   = flag.Int("m", 10, "Number of accounts to modify after creation")
 		kCommit   = flag.Int("k", 50, "Number of accounts per commit/flush")
-		dbPath    = flag.String("db", "mpt_bench_db", "Path to LevelDB")
+		dbPath    = flag.String("db", "mpt_bench_db", "Path to database")
 		clearDB   = flag.Bool("clear", true, "Clear database before starting")
 	)
 	flag.Parse()
@@ -37,19 +37,19 @@ func main() {
 		os.RemoveAll(*dbPath)
 	}
 
-	// 1. Initialize LevelDB
-	fmt.Printf("Initializing LevelDB at %s (Compression: Off)...\n", *dbPath)
-	ldb, err := leveldb.NewCustom(*dbPath, "eth/db/chaindata/", func(options *opt.Options) {
-		options.Compression = opt.NoCompression
-		options.OpenFilesCacheCapacity = 1024
-		options.BlockCacheCapacity = 256 * opt.MiB
-		options.WriteBuffer = 64 * opt.MiB
+	// 1. Initialize Pebble
+	fmt.Printf("Initializing Pebble at %s (Compression: Off)...\n", *dbPath)
+	pdb, err := ethpebble.NewCustom(*dbPath, "eth/db/chaindata/", func(options *pebble.Options) {
+		for i := range options.Levels {
+			options.Levels[i].Compression = pebble.NoCompression
+		}
+		options.Cache = pebble.NewCache(256 * 1024 * 1024)
 	})
 	if err != nil {
-		fmt.Printf("Failed to open LevelDB: %v\n", err)
+		fmt.Printf("Failed to open Pebble: %v\n", err)
 		return
 	}
-	diskdb := rawdb.NewDatabase(ldb)
+	diskdb := rawdb.NewDatabase(pdb)
 	defer diskdb.Close()
 
 	// 2. Initialize TrieDB (PathDB for Pruning) and StateDB

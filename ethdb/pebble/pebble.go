@@ -178,15 +178,20 @@ func (l panicLogger) Fatalf(format string, args ...interface{}) {
 // New returns a wrapped pebble DB object. The namespace is the prefix that the
 // metrics reporting should use for surfacing internal stats.
 func New(file string, cache int, handles int, namespace string, readonly bool) (*Database, error) {
-	// Ensure we have some minimal caching and file guarantees
-	if cache < minCache {
-		cache = minCache
-	}
-	if handles < minHandles {
-		handles = minHandles
-	}
+	return NewCustom(file, namespace, func(options *pebble.Options) {
+		options.Cache = pebble.NewCache(int64(cache * 1024 * 1024))
+		options.MaxOpenFiles = handles
+		if readonly {
+			options.ReadOnly = true
+		}
+	})
+}
+
+// NewCustom returns a wrapped Pebble object. The namespace is the prefix that the
+// metrics reporting should use for surfacing internal stats.
+// The customize function allows the caller to modify the pebble options.
+func NewCustom(file string, namespace string, customize func(options *pebble.Options)) (*Database, error) {
 	logger := log.New("database", file)
-	logger.Info("Allocated cache and file handles", "cache", common.StorageSize(cache*1024*1024), "handles", handles)
 
 	// The max memtable size is limited by the uint32 offsets stored in
 	// internal/arenaskl.node, DeferredBatchOp, and flushableBatchEntry.
@@ -205,8 +210,8 @@ func New(file string, cache int, handles int, namespace string, readonly bool) (
 	// limit unchanged allows writes to be flushed more smoothly. This helps
 	// avoid compaction spikes and mitigates write stalls caused by heavy
 	// compaction workloads.
-	memTableNumber := 4
-	memTableSize := cache * 1024 * 1024 / 2 / memTableNumber
+	memTableLimit := 4
+	memTableSize := 256 * 1024 * 1024 / 2 / memTableLimit
 
 	// The memory table size is currently capped at maxMemTableSize-1 due to a
 	// known bug in the pebble where maxMemTableSize is not recognized as a
@@ -218,11 +223,8 @@ func New(file string, cache int, handles int, namespace string, readonly bool) (
 		memTableSize = maxMemTableSize - 1
 	}
 	db := &Database{
-		fn:        file,
-		log:       logger,
-		quitChan:  make(chan chan error),
-		namespace: namespace,
-
+		fn:  file,
+		log: logger,
 		// Use asynchronous write mode by default. Otherwise, the overhead of frequent fsync
 		// operations can be significant, especially on platforms with slow fsync performance
 		// (e.g., macOS) or less capable SSDs.
@@ -231,28 +233,26 @@ func New(file string, cache int, handles int, namespace string, readonly bool) (
 		// application-level panic (writes will also be lost on a machine-level failure,
 		// of course). Geth is expected to handle recovery from an unclean shutdown.
 		writeOptions: pebble.NoSync,
+		quitChan:     make(chan chan error),
+		namespace:    namespace,
 	}
 	opt := &pebble.Options{
 		// Pebble has a single combined cache area and the write
 		// buffers are taken from this too. Assign all available
 		// memory allowance for cache.
-		Cache:        pebble.NewCache(int64(cache * 1024 * 1024)),
-		MaxOpenFiles: handles,
+		Cache:        pebble.NewCache(256 * 1024 * 1024),
+		MaxOpenFiles: 1024,
 
 		// The size of memory table(as well as the write buffer).
 		// Note, there may have more than two memory tables in the system.
 		MemTableSize: uint64(memTableSize),
 
-		// MemTableStopWritesThreshold places a hard limit on the number
+		// MemTableStopWritesThreshold places a hard limit on the size
 		// of the existent MemTables(including the frozen one).
-		//
 		// Note, this must be the number of tables not the size of all memtables
 		// according to https://github.com/cockroachdb/pebble/blob/master/options.go#L738-L742
 		// and to https://github.com/cockroachdb/pebble/blob/master/db.go#L1892-L1903.
-		//
-		// MemTableStopWritesThreshold is set to twice the maximum number of
-		// allowed memtables to accommodate temporary spikes.
-		MemTableStopWritesThreshold: memTableNumber * 2,
+		MemTableStopWritesThreshold: memTableLimit,
 
 		// The default compaction concurrency(1 thread),
 		// Here use all available CPUs for faster compaction.
@@ -267,11 +267,8 @@ func New(file string, cache int, handles int, namespace string, readonly bool) (
 			{TargetFileSize: 16 * 1024 * 1024, FilterPolicy: bloom.FilterPolicy(10)},
 			{TargetFileSize: 32 * 1024 * 1024, FilterPolicy: bloom.FilterPolicy(10)},
 			{TargetFileSize: 64 * 1024 * 1024, FilterPolicy: bloom.FilterPolicy(10)},
-
-			// Pebble doesn't use the Bloom filter at level6 for read efficiency.
-			{TargetFileSize: 128 * 1024 * 1024},
+			{TargetFileSize: 128 * 1024 * 1024, FilterPolicy: bloom.FilterPolicy(10)},
 		},
-		ReadOnly: readonly,
 		EventListener: &pebble.EventListener{
 			CompactionBegin: db.onCompactionBegin,
 			CompactionEnd:   db.onCompactionEnd,
@@ -300,16 +297,13 @@ func New(file string, cache int, handles int, namespace string, readonly bool) (
 		// debt will be less than 1GB, but with more frequent compactions scheduled.
 		L0CompactionThreshold: 2,
 	}
-	// These two settings define the conditions under which compaction concurrency
-	// is increased. Specifically, one additional compaction job will be enabled when:
-	// - there is one more overlapping sub-level0;
-	// - there is an additional 512 MB of compaction debt;
-	//
-	// The maximum concurrency is still capped by MaxConcurrentCompactions, but with
-	// these settings compactions can scale up more readily.
-	opt.Experimental.L0CompactionConcurrency = 1
-	opt.Experimental.CompactionDebtConcurrency = 1 << 28 // 256MB
+	// Disable seek compaction explicitly. Check https://github.com/ethereum/go-ethereum/pull/20130
+	// for more details.
+	opt.Experimental.ReadSamplingMultiplier = -1
 
+	if customize != nil {
+		customize(opt)
+	}
 	// Open the db and recover any potential corruptions
 	innerDB, err := pebble.Open(file, opt)
 	if err != nil {
