@@ -66,8 +66,9 @@ func main() {
 		statedb.SetNonce(addr, uint64(i), tracing.NonceChangeUnspecified)
 
 		for j := 0; j < *nSlots; j++ {
-			slotKey := common.BytesToHash(crypto.Keccak256([]byte(fmt.Sprintf("slot-%d", j))))
-			slotVal := common.BytesToHash(crypto.Keccak256([]byte(fmt.Sprintf("value-%d", j))))
+			// Include account index i to ensure slots are unique across different accounts
+			slotKey := common.BytesToHash(crypto.Keccak256([]byte(fmt.Sprintf("account-%d-slot-%d", i, j))))
+			slotVal := common.BytesToHash(crypto.Keccak256([]byte(fmt.Sprintf("account-%d-value-%d", i, j))))
 			statedb.SetState(addr, slotKey, slotVal)
 		}
 
@@ -108,12 +109,14 @@ func main() {
 	r := rand.New(rand.NewSource(time.Now().UnixNano()))
 	perm := r.Perm(*nAccounts)
 	for i := 0; i < *mModify; i++ {
-		addr := addrs[perm[i]]
+		accountIdx := perm[i]
+		addr := addrs[accountIdx]
 
 		// Modify some slots randomly
 		for j := 0; j < 500; j++ { // modify 500 random slots per account
 			slotIdx := r.Intn(*nSlots)
-			slotKey := common.BytesToHash(crypto.Keccak256([]byte(fmt.Sprintf("slot-%d", slotIdx))))
+			// Use the same unique key pattern as in Phase 1
+			slotKey := common.BytesToHash(crypto.Keccak256([]byte(fmt.Sprintf("account-%d-slot-%d", accountIdx, slotIdx))))
 			newVal := common.BytesToHash(crypto.Keccak256([]byte(fmt.Sprintf("new-value-%d-%d", i, j))))
 			statedb.SetState(addr, slotKey, newVal)
 		}
